@@ -1,0 +1,694 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bomberman</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: #1a1a2e;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    font-family: 'Courier New', monospace;
+    color: #fff;
+  }
+
+  h1 {
+    font-size: 2.5rem;
+    color: #e94560;
+    text-shadow: 0 0 20px #e94560;
+    margin-bottom: 10px;
+    letter-spacing: 4px;
+  }
+
+  #hud {
+    display: flex;
+    gap: 40px;
+    margin-bottom: 12px;
+    font-size: 1rem;
+    color: #aad4f5;
+  }
+  #hud span { color: #fff; font-weight: bold; }
+
+  #game-wrapper {
+    position: relative;
+  }
+
+  canvas {
+    display: block;
+    border: 3px solid #e94560;
+    box-shadow: 0 0 30px #e9456066;
+    image-rendering: pixelated;
+  }
+
+  #overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(0,0,0,0.82);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 18px;
+  }
+  #overlay h2 { font-size: 2rem; color: #e94560; letter-spacing: 3px; }
+  #overlay p  { color: #aad4f5; font-size: 1rem; }
+  #overlay button {
+    margin-top: 10px;
+    padding: 12px 36px;
+    background: #e94560;
+    color: #fff;
+    border: none;
+    font-size: 1.1rem;
+    font-family: inherit;
+    letter-spacing: 2px;
+    cursor: pointer;
+    border-radius: 4px;
+    transition: background 0.2s, transform 0.1s;
+  }
+  #overlay button:hover { background: #c73652; transform: scale(1.05); }
+
+  #controls {
+    margin-top: 14px;
+    font-size: 0.78rem;
+    color: #667;
+    text-align: center;
+    line-height: 1.8;
+  }
+</style>
+</head>
+<body>
+
+<h1>💣 BOMBERMAN</h1>
+<div id="hud">
+  <div>PUAN: <span id="score">0</span></div>
+  <div>CAN: <span id="lives">❤❤❤</span></div>
+  <div>BOMBA: <span id="bombCount">1</span></div>
+  <div>MENZİL: <span id="bombRange">2</span></div>
+  <div>SEVİYE: <span id="level">1</span></div>
+</div>
+
+<div id="game-wrapper">
+  <canvas id="canvas"></canvas>
+
+  <div id="overlay">
+    <h2>💣 BOMBERMAN</h2>
+    <p>Klasik arcade bomberman deneyimi</p>
+    <p style="color:#e94560;font-size:0.9rem">Düşmanları patlatarak haritayı temizle!</p>
+    <button id="startBtn">OYUNA BAŞLA</button>
+    <div style="margin-top:8px;color:#556;font-size:0.82rem">
+      Hareket: WASD veya Ok tuşları &nbsp;|&nbsp; Bomba: SPACE veya F
+    </div>
+  </div>
+</div>
+
+<div id="controls">
+  Hareket: W A S D &nbsp;/&nbsp; ↑ ← ↓ → &nbsp;&nbsp;|&nbsp;&nbsp; Bomba bırak: SPACE veya F
+</div>
+
+<script>
+const TILE = 48;
+const COLS = 15;
+const ROWS = 13;
+
+const canvas = document.getElementById('canvas');
+const ctx    = canvas.getContext('2d');
+canvas.width  = COLS * TILE;
+canvas.height = ROWS * TILE;
+
+// ─── Tile types ───────────────────────────────────────────────
+const T = { EMPTY:0, WALL:1, BOX:2, BOMB:3, FLAME:4, ITEM:5 };
+
+// ─── Items ────────────────────────────────────────────────────
+const ITEM_TYPES = { BOMB_UP:0, RANGE_UP:1, SPEED_UP:2, EXTRA_LIFE:3 };
+
+// ─── Colour palette ───────────────────────────────────────────
+const C = {
+  bg:      '#2d2d44',
+  wall:    '#0d0d1a',
+  wallEdge:'#1a1a33',
+  box:     '#8B5E3C',
+  boxEdge: '#6B3E1C',
+  flame:   '#FF6B00',
+  flame2:  '#FFD700',
+  item:    ['#00d4ff','#ff6bff','#00ff99','#ff4444'],
+  ground:  '#3a3a55',
+};
+
+// ─── State ────────────────────────────────────────────────────
+let map, player, enemies, bombs, flames, items;
+let score = 0, lives = 3, level = 1;
+let gameState = 'menu'; // menu | playing | dead | levelClear | gameOver
+let keys = {};
+let lastTime = 0, moveTimer = 0;
+let inputCooldown = 0;
+
+// ─── Map generation ───────────────────────────────────────────
+function buildMap() {
+  const m = [];
+  for (let r = 0; r < ROWS; r++) {
+    m[r] = [];
+    for (let c = 0; c < COLS; c++) {
+      if (r === 0 || r === ROWS-1 || c === 0 || c === COLS-1) { m[r][c] = T.WALL; }
+      else if (r % 2 === 0 && c % 2 === 0)                    { m[r][c] = T.WALL; }
+      else                                                      { m[r][c] = T.EMPTY; }
+    }
+  }
+  // place boxes (avoid player spawn corners)
+  const safe = [[1,1],[1,2],[2,1],[1,COLS-2],[2,COLS-2],[ROWS-2,1],[ROWS-3,1],[ROWS-2,COLS-2],[ROWS-3,COLS-2]];
+  const isSafe = (r,c) => safe.some(([sr,sc]) => sr===r && sc===c);
+
+  const density = Math.min(0.45 + level * 0.03, 0.65);
+  for (let r = 1; r < ROWS-1; r++)
+    for (let c = 1; c < COLS-1; c++)
+      if (m[r][c] === T.EMPTY && !isSafe(r,c) && Math.random() < density)
+        m[r][c] = T.BOX;
+
+  return m;
+}
+
+// ─── Item drops ───────────────────────────────────────────────
+const itemGrid = {}; // "r,c" -> item type
+function dropItem(r, c) {
+  if (Math.random() < 0.28) {
+    const t = Math.floor(Math.random() * 4);
+    itemGrid[`${r},${c}`] = t;
+  }
+}
+
+// ─── Enemy AI ─────────────────────────────────────────────────
+function makeEnemy(r, c) {
+  return { r, c, x: c*TILE+TILE/2, y: r*TILE+TILE/2, dir: Math.floor(Math.random()*4), moveTimer: 0, alive: true, speed: 1.5 + level*0.2 };
+}
+
+function spawnEnemies() {
+  const count = Math.min(3 + level, 10);
+  const spawns = [];
+  for (let r = 1; r < ROWS-1; r++)
+    for (let c = 1; c < COLS-1; c++) {
+      if (map[r][c] === T.EMPTY && !(r<=2 && c<=2)) spawns.push([r,c]);
+    }
+  shuffleArr(spawns);
+  return spawns.slice(0, count).map(([r,c]) => makeEnemy(r, c));
+}
+
+function shuffleArr(a) {
+  for (let i = a.length-1; i > 0; i--) {
+    const j = Math.floor(Math.random()*(i+1));
+    [a[i],a[j]] = [a[j],a[i]];
+  }
+}
+
+// ─── Init level ───────────────────────────────────────────────
+function initLevel() {
+  map     = buildMap();
+  Object.keys(itemGrid).forEach(k => delete itemGrid[k]);
+  bombs   = [];
+  flames  = [];
+  items   = [];
+  enemies = spawnEnemies();
+  player  = {
+    r: 1, c: 1,
+    x: 1*TILE + TILE/2,
+    y: 1*TILE + TILE/2,
+    alive: true,
+    invincible: 0,
+    bombMax: 1 + Math.floor((score/500)),
+    bombRange: 2,
+    speed: 3,
+    bombsActive: 0,
+  };
+  player.bombMax = Math.max(1, player.bombMax);
+}
+
+// ─── Bomb logic ───────────────────────────────────────────────
+function placeBomb() {
+  if (player.bombsActive >= player.bombMax) return;
+  const r = player.r, c = player.c;
+  if (bombs.some(b => b.r===r && b.c===c)) return;
+  bombs.push({ r, c, timer: 3000, range: player.bombRange });
+  player.bombsActive++;
+  map[r][c] = T.BOMB;
+}
+
+function explodeBomb(bomb) {
+  map[bomb.r][bomb.c] = T.EMPTY;
+  player.bombsActive = Math.max(0, player.bombsActive - 1);
+
+  const dirs = [[0,0],[1,0],[-1,0],[0,1],[0,-1]];
+  for (const [dr, dc] of dirs) {
+    const maxR = dr===0 && dc===0 ? 0 : bomb.range;
+    for (let i = 0; i <= maxR; i++) {
+      const nr = bomb.r + dr*i, nc = bomb.c + dc*i;
+      if (nr<0||nr>=ROWS||nc<0||nc>=COLS) break;
+      if (map[nr][nc] === T.WALL) break;
+      if (map[nr][nc] === T.BOX) {
+        map[nr][nc] = T.EMPTY;
+        dropItem(nr, nc);
+        flames.push({ r:nr, c:nc, timer: 600, center: i===0 });
+        break;
+      }
+      if (map[nr][nc] === T.BOMB) {
+        const chain = bombs.find(b => b.r===nr && b.c===nc);
+        if (chain) { chain.timer = 1; }
+      }
+      flames.push({ r:nr, c:nc, timer: 600, center: i===0 });
+      if (map[nr][nc] === T.BOMB) break;
+    }
+  }
+}
+
+// ─── Pixel-precise movement ───────────────────────────────────
+const DIRS = [
+  { dr:-1, dc:0, key:['ArrowUp','w','W'] },
+  { dr: 1, dc:0, key:['ArrowDown','s','S'] },
+  { dr:0, dc:-1, key:['ArrowLeft','a','A'] },
+  { dr:0, dc: 1, key:['ArrowRight','d','D'] },
+];
+
+function canMoveTo(r, c) {
+  if (r<0||r>=ROWS||c<0||c>=COLS) return false;
+  const t = map[r][c];
+  return t === T.EMPTY || t === T.FLAME || t === T.ITEM ||
+         (t === T.BOMB && (r===player.r && c===player.c));
+}
+
+function movePlayer(dt) {
+  const spd = player.speed * TILE * dt / 1000;
+  let dx = 0, dy = 0;
+  if (keys['ArrowUp']    || keys['w'] || keys['W']) dy -= spd;
+  if (keys['ArrowDown']  || keys['s'] || keys['S']) dy += spd;
+  if (keys['ArrowLeft']  || keys['a'] || keys['A']) dx -= spd;
+  if (keys['ArrowRight'] || keys['d'] || keys['D']) dx += spd;
+
+  if (dx !== 0 || dy !== 0) {
+    // try X
+    const nx = player.x + dx, ny = player.y;
+    if (canMovePx(nx, ny)) player.x = nx;
+    // try Y
+    const nx2 = player.x, ny2 = player.y + dy;
+    if (canMovePx(nx2, ny2)) player.y = ny2;
+    // clamp
+    player.x = Math.max(TILE*0.5+1, Math.min(player.x, (COLS-0.5)*TILE-1));
+    player.y = Math.max(TILE*0.5+1, Math.min(player.y, (ROWS-0.5)*TILE-1));
+    player.r = Math.round((player.y - TILE/2) / TILE);
+    player.c = Math.round((player.x - TILE/2) / TILE);
+  }
+}
+
+const MARGIN = 10;
+function canMovePx(px, py) {
+  // check all 4 corners of player hitbox
+  const corners = [
+    [py - TILE/2 + MARGIN, px - TILE/2 + MARGIN],
+    [py - TILE/2 + MARGIN, px + TILE/2 - MARGIN],
+    [py + TILE/2 - MARGIN, px - TILE/2 + MARGIN],
+    [py + TILE/2 - MARGIN, px + TILE/2 - MARGIN],
+  ];
+  for (const [cy, cx] of corners) {
+    const r = Math.floor(cy / TILE), c = Math.floor(cx / TILE);
+    if (!canMoveTo(r, c)) return false;
+  }
+  return true;
+}
+
+// ─── Enemy movement ───────────────────────────────────────────
+const ENEMY_DIRS = [[-1,0],[1,0],[0,-1],[0,1]];
+function updateEnemies(dt) {
+  for (const e of enemies) {
+    if (!e.alive) continue;
+    e.moveTimer += dt;
+    const interval = Math.max(180 - level*10, 80);
+    if (e.moveTimer < interval) continue;
+    e.moveTimer = 0;
+
+    // try current dir, if blocked pick random
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const [dr, dc] = ENEMY_DIRS[e.dir];
+      const nr = e.r + dr, nc = e.c + dc;
+      if (canEnemyMove(nr, nc)) {
+        e.r = nr; e.c = nc;
+        e.x = nc*TILE + TILE/2; e.y = nr*TILE + TILE/2;
+        break;
+      }
+      e.dir = Math.floor(Math.random() * 4);
+    }
+  }
+}
+
+function canEnemyMove(r, c) {
+  if (r<0||r>=ROWS||c<0||c>=COLS) return false;
+  return map[r][c] === T.EMPTY;
+}
+
+// ─── Collision checks ─────────────────────────────────────────
+function checkCollisions() {
+  if (player.invincible > 0) return;
+  // flames
+  flames.forEach(f => {
+    if (f.r === player.r && f.c === player.c) hitPlayer();
+  });
+  // enemies
+  enemies.forEach(e => {
+    if (!e.alive) return;
+    const dist = Math.hypot(e.x - player.x, e.y - player.y);
+    if (dist < TILE * 0.65) hitPlayer();
+  });
+  // enemies in flames
+  enemies.forEach(e => {
+    if (!e.alive) return;
+    flames.forEach(f => {
+      if (f.r === e.r && f.c === e.c) {
+        e.alive = false;
+        score += 100 * level;
+        updateHUD();
+      }
+    });
+  });
+  // items
+  const key = `${player.r},${player.c}`;
+  if (itemGrid[key] !== undefined) {
+    collectItem(itemGrid[key]);
+    delete itemGrid[key];
+  }
+}
+
+function hitPlayer() {
+  if (player.invincible > 0) return;
+  lives--;
+  player.invincible = 2500;
+  updateHUD();
+  if (lives <= 0) { gameState = 'gameOver'; showOverlay('OYUN BİTTİ', `Puan: ${score}`, 'YENİDEN OYNA'); }
+}
+
+function collectItem(type) {
+  if (type === ITEM_TYPES.BOMB_UP)  { player.bombMax  = Math.min(player.bombMax+1, 6); }
+  if (type === ITEM_TYPES.RANGE_UP) { player.bombRange = Math.min(player.bombRange+1, 7); }
+  if (type === ITEM_TYPES.SPEED_UP) { player.speed     = Math.min(player.speed+0.5, 6); }
+  if (type === ITEM_TYPES.EXTRA_LIFE){ lives = Math.min(lives+1, 5); }
+  score += 50;
+  updateHUD();
+}
+
+// ─── HUD ──────────────────────────────────────────────────────
+function updateHUD() {
+  document.getElementById('score').textContent = score;
+  document.getElementById('lives').textContent = '❤'.repeat(Math.max(lives,0));
+  document.getElementById('bombCount').textContent = player ? player.bombMax : 1;
+  document.getElementById('bombRange').textContent = player ? player.bombRange : 2;
+  document.getElementById('level').textContent = level;
+}
+
+// ─── Overlay ──────────────────────────────────────────────────
+const overlay = document.getElementById('overlay');
+function showOverlay(title, sub, btn) {
+  overlay.innerHTML = `
+    <h2>${title}</h2>
+    <p>${sub}</p>
+    <button id="startBtn">${btn}</button>
+  `;
+  overlay.style.display = 'flex';
+  document.getElementById('startBtn').addEventListener('click', startGame);
+}
+function hideOverlay() { overlay.style.display = 'none'; }
+
+// ─── Start ────────────────────────────────────────────────────
+function startGame() {
+  score = 0; lives = 3; level = 1;
+  initLevel();
+  updateHUD();
+  hideOverlay();
+  gameState = 'playing';
+  lastTime = performance.now();
+  requestAnimationFrame(gameLoop);
+}
+
+document.getElementById('startBtn').addEventListener('click', startGame);
+
+// ─── Game loop ────────────────────────────────────────────────
+function gameLoop(ts) {
+  if (gameState !== 'playing') return;
+  const dt = Math.min(ts - lastTime, 64);
+  lastTime = ts;
+
+  update(dt);
+  draw();
+
+  if (gameState === 'playing') requestAnimationFrame(gameLoop);
+  else requestAnimationFrame(gameLoop); // keep loop for overlay frames
+}
+
+function update(dt) {
+  if (gameState !== 'playing') return;
+
+  if (player.invincible > 0) player.invincible -= dt;
+
+  movePlayer(dt);
+
+  // Bomb placement
+  if ((keys[' '] || keys['f'] || keys['F']) && inputCooldown <= 0) {
+    placeBomb();
+    inputCooldown = 300;
+  }
+  if (inputCooldown > 0) inputCooldown -= dt;
+
+  // Bomb timers
+  bombs.forEach(b => { b.timer -= dt; });
+  const toExplode = bombs.filter(b => b.timer <= 0);
+  bombs = bombs.filter(b => b.timer > 0);
+  toExplode.forEach(explodeBomb);
+
+  // Flame timers
+  flames.forEach(f => { f.timer -= dt; });
+  flames = flames.filter(f => f.timer > 0);
+
+  updateEnemies(dt);
+  checkCollisions();
+
+  // Level clear?
+  if (enemies.every(e => !e.alive)) {
+    level++;
+    score += 500;
+    updateHUD();
+    initLevel();
+    showOverlay(`SEVİYE ${level}!`, `+500 puan. Devam ediyorsun!`, 'DEVAM ET');
+    gameState = 'levelClear';
+    // Auto-continue after 1.5s OR button click
+    setTimeout(() => {
+      if (gameState === 'levelClear') resumeFromOverlay();
+    }, 2000);
+  }
+}
+
+function resumeFromOverlay() {
+  hideOverlay();
+  gameState = 'playing';
+  lastTime = performance.now();
+  requestAnimationFrame(gameLoop);
+}
+
+// override overlay button for level clear
+function handleOverlayBtn() {
+  if (gameState === 'gameOver') { startGame(); }
+  else { resumeFromOverlay(); }
+}
+
+// ─── Drawing ──────────────────────────────────────────────────
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  // Ground
+  ctx.fillStyle = C.ground;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // Tiles
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const x = c*TILE, y = r*TILE, t = map[r][c];
+      if (t === T.WALL)  drawWall(x, y);
+      else if (t === T.BOX)  drawBox(x, y);
+      else if (t === T.BOMB) drawBomb(x, y, bombs.find(b=>b.r===r&&b.c===c));
+    }
+  }
+
+  // Items
+  for (const [key, type] of Object.entries(itemGrid)) {
+    const [r, c] = key.split(',').map(Number);
+    drawItem(c*TILE, r*TILE, type);
+  }
+
+  // Flames
+  flames.forEach(f => drawFlame(f.c*TILE, f.r*TILE, f.center, f.timer));
+
+  // Enemies
+  enemies.forEach(e => { if (e.alive) drawEnemy(e.x, e.y); });
+
+  // Player
+  if (player) drawPlayer(player.x, player.y, player.invincible > 0);
+}
+
+function drawWall(x, y) {
+  ctx.fillStyle = C.wall;
+  ctx.fillRect(x, y, TILE, TILE);
+  ctx.fillStyle = C.wallEdge;
+  ctx.fillRect(x+2, y+2, TILE-4, 4);
+  ctx.fillRect(x+2, y+2, 4, TILE-4);
+}
+
+function drawBox(x, y) {
+  ctx.fillStyle = C.box;
+  ctx.fillRect(x+2, y+2, TILE-4, TILE-4);
+  ctx.fillStyle = C.boxEdge;
+  ctx.strokeStyle = C.boxEdge;
+  ctx.lineWidth = 2;
+  ctx.strokeRect(x+3, y+3, TILE-6, TILE-6);
+  // X mark
+  ctx.strokeStyle = '#a06040';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(x+8, y+8); ctx.lineTo(x+TILE-8, y+TILE-8);
+  ctx.moveTo(x+TILE-8, y+8); ctx.lineTo(x+8, y+TILE-8);
+  ctx.stroke();
+}
+
+function drawBomb(x, y, bomb) {
+  const cx = x+TILE/2, cy = y+TILE/2;
+  const pulse = bomb ? Math.sin(Date.now() / (bomb.timer > 1000 ? 300 : 80)) * 2 : 0;
+  const r = TILE/2 - 6 + pulse;
+  ctx.fillStyle = '#111';
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI*2); ctx.fill();
+  // shine
+  ctx.fillStyle = '#444';
+  ctx.beginPath(); ctx.arc(cx-r*0.3, cy-r*0.3, r*0.3, 0, Math.PI*2); ctx.fill();
+  // fuse
+  ctx.strokeStyle = '#f80';
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(cx+r*0.4, cy-r*0.6);
+  ctx.quadraticCurveTo(cx+r*0.8, cy-r*1.2, cx+r*0.2, cy-r*1.4);
+  ctx.stroke();
+  // spark
+  if (Math.random() > 0.5) {
+    ctx.fillStyle = '#ff0';
+    ctx.beginPath(); ctx.arc(cx+r*0.2, cy-r*1.4, 2, 0, Math.PI*2); ctx.fill();
+  }
+}
+
+function drawFlame(x, y, center, timer) {
+  const alpha = Math.min(timer / 200, 1);
+  const cx = x+TILE/2, cy = y+TILE/2;
+  ctx.globalAlpha = alpha;
+  // outer glow
+  const g = ctx.createRadialGradient(cx, cy, 2, cx, cy, TILE/2-2);
+  g.addColorStop(0, '#fff8c0');
+  g.addColorStop(0.3, '#ff6b00');
+  g.addColorStop(1, 'rgba(255,30,0,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(x, y, TILE, TILE);
+  ctx.globalAlpha = 1;
+}
+
+function drawItem(x, y, type) {
+  const cx = x+TILE/2, cy = y+TILE/2;
+  const icons = ['💣','+','⚡','❤'];
+  const colors = ['#00d4ff','#ff6bff','#00ff99','#ff4444'];
+  // glow bg
+  ctx.fillStyle = colors[type] + '44';
+  ctx.beginPath(); ctx.arc(cx, cy, TILE/2-6, 0, Math.PI*2); ctx.fill();
+  ctx.strokeStyle = colors[type];
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.font = `${TILE*0.45}px serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(icons[type], cx, cy+1);
+}
+
+function drawEnemy(ex, ey) {
+  const t = Date.now();
+  // body
+  ctx.fillStyle = '#d22';
+  ctx.beginPath(); ctx.arc(ex, ey, TILE/2-8, 0, Math.PI*2); ctx.fill();
+  // eyes
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(ex-5, ey-4, 4, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(ex+5, ey-4, 4, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#000';
+  ctx.beginPath(); ctx.arc(ex-4, ey-4, 2, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(ex+6, ey-4, 2, 0, Math.PI*2); ctx.fill();
+  // angry brows
+  ctx.strokeStyle = '#000';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(ex-9, ey-9); ctx.lineTo(ex-2, ey-7);
+  ctx.moveTo(ex+2, ey-7); ctx.lineTo(ex+9, ey-9);
+  ctx.stroke();
+  // legs bounce
+  const bounce = Math.sin(t/120) * 2;
+  ctx.fillStyle = '#a00';
+  ctx.fillRect(ex-8, ey+TILE/2-14+bounce, 5, 7);
+  ctx.fillRect(ex+3, ey+TILE/2-14-bounce, 5, 7);
+}
+
+function drawPlayer(px, py, invincible) {
+  if (invincible && Math.floor(Date.now()/80)%2 === 0) return;
+  const t = Date.now();
+  // shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.25)';
+  ctx.beginPath(); ctx.ellipse(px, py+TILE/2-8, 12, 5, 0, 0, Math.PI*2); ctx.fill();
+  // body (white bomberman)
+  ctx.fillStyle = '#eee';
+  ctx.beginPath(); ctx.arc(px, py, TILE/2-6, 0, Math.PI*2); ctx.fill();
+  ctx.strokeStyle = '#aaa';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  // helmet
+  ctx.fillStyle = '#3399ff';
+  ctx.beginPath();
+  ctx.arc(px, py, TILE/2-6, Math.PI, 0);
+  ctx.fill();
+  // face
+  ctx.fillStyle = '#ffd699';
+  ctx.beginPath(); ctx.arc(px, py+2, TILE/2-10, 0, Math.PI*2); ctx.fill();
+  // eyes
+  ctx.fillStyle = '#000';
+  ctx.beginPath(); ctx.arc(px-4, py, 2.5, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(px+4, py, 2.5, 0, Math.PI*2); ctx.fill();
+  // mouth smile
+  ctx.strokeStyle = '#964B00';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(px, py+3, 4, 0.2, Math.PI-0.2);
+  ctx.stroke();
+  // legs
+  const bounce = Math.sin(t/130) * 2;
+  ctx.fillStyle = '#555';
+  ctx.fillRect(px-9, py+TILE/2-14+bounce, 7, 8);
+  ctx.fillRect(px+2, py+TILE/2-14-bounce, 7, 8);
+  // shoes
+  ctx.fillStyle = '#222';
+  ctx.fillRect(px-10, py+TILE/2-7+bounce, 9, 4);
+  ctx.fillRect(px+1, py+TILE/2-7-bounce, 9, 4);
+}
+
+// ─── Input ────────────────────────────────────────────────────
+document.addEventListener('keydown', e => {
+  keys[e.key] = true;
+  if ([' ','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key)) e.preventDefault();
+});
+document.addEventListener('keyup', e => { keys[e.key] = false; });
+
+// Patch overlay button for level clear / game over
+overlay.addEventListener('click', e => {
+  if (e.target.tagName === 'BUTTON') {
+    if (gameState === 'gameOver')     { startGame(); }
+    else if (gameState === 'levelClear') { resumeFromOverlay(); }
+  }
+});
+</script>
+</body>
+</html>
